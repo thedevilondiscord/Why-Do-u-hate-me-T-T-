@@ -1,5 +1,5 @@
 -- ========================================================
--- TATr Controller & Sync Engine (Firebase Restricted)
+-- TATr Controller & Sync Engine (Fixed Live Audio Sync)
 -- ========================================================
 
 local MUSIC_SESSION_FIREBASE_URL = "https://kmusicsessionxd-default-rtdb.asia-southeast1.firebasedatabase.app/"
@@ -35,7 +35,7 @@ local inactiveTimer = 0
 local INACTIVE_LIMIT = 540
 local lastSyncTimestamp = 0
 
--- Helper for HTTP requests across various executors
+-- Helper for HTTP requests
 local httpRequest = (syn and syn.request) or (http and http.request) or request or HttpService.RequestAsync
 
 local function firebaseSet(path, data)
@@ -76,7 +76,7 @@ local function stopCurrentTrack()
     end
 end
 
--- 2. Hide original UI
+-- 2. Permanently hide original UI frames
 local originalMainFrame = nil
 for _, child in ipairs(targetGui:GetChildren()) do
     if child:IsA("Frame") then
@@ -115,7 +115,7 @@ if originalMainFrame then
     end
 end
 
--- 4. Build Custom Remote Interface
+-- 4. Build Custom UI
 local remoteGui = Instance.new("ScreenGui")
 remoteGui.Name = "TATrRemoteControl"
 remoteGui.ResetOnSpawn = false
@@ -141,9 +141,9 @@ local title = Instance.new("TextLabel")
 title.Size = UDim2.new(1, -20, 0, 30)
 title.Position = UDim2.new(0, 12, 0, 6)
 title.BackgroundTransparency = 1
-title.Text = isController and "TATr Controller (Host)" or "TATr Listener (Syncing...)"
+title.Text = isController and "TATr Controller (Host: " .. AUTHORIZED_CONTROLLER .. ")" or "TATr Listener (Synced)"
 title.TextColor3 = isController and Color3.fromRGB(34, 197, 94) or Color3.fromRGB(147, 197, 253)
-title.TextSize = 12
+title.TextSize = 11
 title.Font = Enum.Font.GothamBold
 title.TextXAlignment = Enum.TextXAlignment.Left
 title.Parent = main
@@ -179,7 +179,7 @@ local statusLbl = Instance.new("TextLabel")
 statusLbl.Size = UDim2.new(1, -24, 0, 20)
 statusLbl.Position = UDim2.new(0, 12, 0, 76)
 statusLbl.BackgroundTransparency = 1
-statusLbl.Text = "Status: Ready"
+statusLbl.Text = isController and "Status: Ready" or "Status: Listening for Host..."
 statusLbl.TextColor3 = Color3.fromRGB(160, 160, 190)
 statusLbl.TextSize = 10
 statusLbl.Font = Enum.Font.Gotham
@@ -231,7 +231,7 @@ queueAllBtn.TextSize = 9
 queueAllBtn.Parent = main
 Instance.new("UICorner", queueAllBtn).CornerRadius = UDim.new(0, 6)
 
--- Library Frame
+-- Library List Frame
 local libHeader = Instance.new("TextLabel")
 libHeader.Size = UDim2.new(1, -24, 0, 20)
 libHeader.Position = UDim2.new(0, 12, 0, 136)
@@ -411,7 +411,7 @@ refreshLibrary = function()
     scrollFrame.CanvasSize = UDim2.new(0, 0, 0, count * 34)
 end
 
--- Controller UI Connections
+-- Host (Kabir_Priv) Control Actions
 if isController then
     local function handleDownloadInput()
         local url = ytBox.Text:match("^%s*(.-)%s*$")
@@ -421,6 +421,9 @@ if isController then
         end
 
         ytBox.Text = ""
+
+        -- Send raw URL via Firebase to trigger background download on listener clients
+        firebaseSet("sessionUrl", {url = url, timestamp = os.time()})
 
         if activeTrack and activeTrack.IsPlaying then
             table.insert(audioQueue, url)
@@ -473,16 +476,41 @@ if isController then
     end)
 end
 
--- Listener Firebase Sync Monitor
+-- Listener Sync & Download Trigger Engine
 if not isController then
+    local lastUrlTimestamp = 0
+
     task.spawn(function()
-        while task.wait(2) do
+        while task.wait(1.5) do
+            -- 1. Check for newly pushed URL to download in background
+            local urlData = firebaseGet("sessionUrl")
+            if urlData and type(urlData) == "table" and urlData.timestamp and urlData.timestamp > lastUrlTimestamp then
+                lastUrlTimestamp = urlData.timestamp
+                if urlData.url and originalMainFrame then
+                    for _, desc in ipairs(originalMainFrame:GetDescendants()) do
+                        if desc:IsA("TextBox") and desc.PlaceholderText:match("Paste YouTube") then
+                            desc.Text = urlData.url
+                            local parent = desc.Parent
+                            for _, btn in ipairs(parent:GetChildren()) do
+                                if btn:IsA("ImageButton") then
+                                    for _, conn in ipairs(getconnections(btn.MouseButton1Click)) do
+                                        conn:Fire()
+                                    end
+                                end
+                            end
+                            break
+                        end
+                    end
+                    task.delay(4, refreshLibrary)
+                end
+            end
+
+            -- 2. Check for Play/Pause/Stop actions from Host
             local state = firebaseGet("sessionState")
             if state and type(state) == "table" and state.timestamp and state.timestamp > lastSyncTimestamp then
                 lastSyncTimestamp = state.timestamp
                 
                 if state.action == "play" and state.fileName then
-                    -- Search local library for matching file name
                     local targetPath = nil
                     if isfolder and isfolder("TATrMusic/") then
                         for _, path in ipairs(listfiles("TATrMusic/")) do
@@ -496,7 +524,7 @@ if not isController then
                     if targetPath then
                         playFile(targetPath, state.fileName, false)
                     else
-                        statusLbl.Text = "Syncing... Missing track: " .. state.fileName:sub(1, 16)
+                        statusLbl.Text = "Syncing... Downloading track: " .. state.fileName:sub(1, 16)
                     end
                 elseif state.action == "pause" and activeTrack then
                     activeTrack:Pause()
