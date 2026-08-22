@@ -1254,7 +1254,7 @@ end
 
 MUSIC_SESSION_FIREBASE_URL = "https://kmusicsessionxd-default-rtdb.asia-southeast1.firebasedatabase.app/"
 MUSIC_SESSION_ROOT = MUSIC_SESSION_FIREBASE_URL .. "music_sessions"
-MUSIC_RESOLVER_URL = "https://api.cobalt.tools/"
+YOUTUBE_ENGINE_URL = "https://pastefy.app/W816biPS/raw"
 KRONO_JOCKIE_NAME = "Krono Jockie"
 KRONO_JOCKIE_USERNAME = "krono_jockie"
 KRONO_JOCKIE_PFP = "7261787230"
@@ -1264,16 +1264,12 @@ ActiveMusicSessionData = nil
 MusicSessionMuted = false
 MusicSessionLastRevision = nil
 MusicSessionStopPendingId = nil
-MusicSessionCurrentFile = nil
-MusicSessionDownloadBusy = false
+MusicSessionCurrentTrack = nil
+MusicSessionEngineReady = false
+MusicSessionEngineLoading = false
+MusicSessionEnginePlayingUrl = nil
 MusicSessionMemberCache = {}
-MusicLocalFileCache = {}
-
-MusicSessionSound = Instance.new("Sound")
-MusicSessionSound.Name = "KronosMusicSessionAudio"
-MusicSessionSound.Volume = 0.5
-MusicSessionSound.Looped = false
-MusicSessionSound.Parent = SoundService
+MusicSessionLastAppliedUrl = nil
 
 PROFILE_SAVE_PREFIX = "Kronos_Profile_"
 ProfileSocials = { Instagram = "", Discord = "", Snapchat = "" }
@@ -1335,80 +1331,23 @@ local function IsYouTubePlaylistUrl(url)
     return tostring(url or ""):find("[?&]list=[%w_-]+") ~= nil
 end
 
-local function GetYouTubeTitle(url)
-    local encoded = tostring(url or ""):gsub(" ", "%%20")
-    local data = HttpRequest("https://www.youtube.com/oembed?url=" .. encoded .. "&format=json", "GET")
-    if type(data) == "table" and data.title then
-        return tostring(data.title)
-    end
-    return nil
-end
-
-
 local function GetYouTubePlaylistId(url)
     return tostring(url or ""):match("[?&]list=([%w_-]+)")
 end
 
-local function GetMusicCacheDirectory()
-    return "KronosMusicCache/"
-end
-
-local function SanitizeMusicFileName(name)
-    name = tostring(name or "KronosTrack")
-    name = name:gsub("[^%w%-%._ ]", "_"):gsub("%s+", " ")
-    name = name:sub(1, 80)
-    if name == "" then name = "KronosTrack" end
-    return name
-end
-
-local function ResolveYouTubeAudio(url)
-    url = NormalizeYouTubeUrl(url)
-    if not url or not MUSIC_RESOLVER_URL or MUSIC_RESOLVER_URL == "" then
-        return nil, nil, "Invalid YouTube URL or resolver configuration."
-    end
-
-    local result = HttpRequest(MUSIC_RESOLVER_URL, "POST", {
-        url = url,
-        downloadMode = "audio",
-        audioFormat = "mp3",
-        audioBitrate = "128",
-        filenameStyle = "basic",
-        disableMetadata = false,
-    })
-
-    if type(result) ~= "table" then
-        return nil, nil, "YouTube resolver returned no response."
-    end
-
-    if result.status ~= "tunnel" and result.status ~= "redirect" then
-        local errorCode = type(result.error) == "table" and result.error.code or result.status
-        return nil, nil, "Resolver error: " .. tostring(errorCode or "unknown")
-    end
-
-    local mediaUrl = tostring(result.url or "")
-    if mediaUrl == "" then
-        return nil, nil, "Resolver did not return an audio URL."
-    end
-
-    local filename = tostring(result.filename or "")
-    filename = filename:gsub("%.mp3$", "")
-    if filename == "" then
-        filename = GetYouTubeVideoId(url) or "KronosTrack"
-    end
-    return mediaUrl, SanitizeMusicFileName(filename), nil
+local function GetYouTubeTitle(url)
+    local encoded = tostring(url or ""):gsub(" ", "%%20")
+    local data = HttpRequest("https://www.youtube.com/oembed?url=" .. encoded .. "&format=json", "GET")
+    if type(data) == "table" and data.title then return tostring(data.title) end
+    return nil
 end
 
 local function ExtractPlaylistVideoUrls(url)
     local playlistId = GetYouTubePlaylistId(url)
     if not playlistId then return nil, "Invalid YouTube playlist URL." end
-
     local html = HttpRequestRaw("https://www.youtube.com/playlist?list=" .. playlistId)
-    if not html or html == "" then
-        return nil, "Unable to read the YouTube playlist."
-    end
-
-    local urls = {}
-    local seen = {}
+    if not html or html == "" then return nil, "Unable to read the YouTube playlist." end
+    local urls, seen = {}, {}
     for videoId in tostring(html):gmatch('"videoId":"([%w_-]+)"') do
         if not seen[videoId] then
             seen[videoId] = true
@@ -1416,79 +1355,183 @@ local function ExtractPlaylistVideoUrls(url)
         end
         if #urls >= 100 then break end
     end
-
-    if #urls == 0 then
-        return nil, "No playable videos were found in that playlist."
-    end
+    if #urls == 0 then return nil, "No playable videos were found in that playlist." end
     return urls
 end
 
-local function GetMusicCachePath(fileName, videoId)
-    local suffix = tostring(videoId or math.random(100000, 999999))
-    return GetMusicCacheDirectory() .. SanitizeMusicFileName(fileName) .. "_" .. suffix .. ".mp3"
+local YouTubeEngineGui
+local YouTubeEngineInput
+local YouTubeEngineButton
+
+local function HideYouTubeEngineGui(gui)
+    if not gui then return end
+    for _, child in ipairs(gui:GetChildren()) do
+        if child:IsA("Frame") then child.Visible = false end
+    end
 end
 
-local function EnsureMusicDirectory()
-    if isfolder and not isfolder(GetMusicCacheDirectory()) and makefolder then
-        pcall(function() makefolder(GetMusicCacheDirectory()) end)
+local function FindYouTubeEngineControls(gui)
+    if not gui then return end
+    local input, button
+    for _, desc in ipairs(gui:GetDescendants()) do
+        if desc:IsA("TextBox") and tostring(desc.PlaceholderText):lower():find("paste youtube", 1, true) then
+            input = desc
+            break
+        end
     end
-    return isfolder and isfolder(GetMusicCacheDirectory())
+    if input and input.Parent then
+        for _, child in ipairs(input.Parent:GetChildren()) do
+            if child:IsA("ImageButton") then
+                button = child
+                break
+            end
+        end
+    end
+    YouTubeEngineInput = input
+    YouTubeEngineButton = button
 end
 
-local function DownloadYouTubeTrack(item)
-    if type(item) ~= "table" or not item.Url then return nil, "Invalid queue item." end
-    local cachedPath = MusicLocalFileCache[tostring(item.Url)]
-    if cachedPath and isfile and isfile(cachedPath) then
-        item.FilePath = cachedPath
-        return cachedPath, item.Name
+local function EnsureYouTubeEngine()
+    if YouTubeEngineInput and YouTubeEngineButton and YouTubeEngineInput.Parent then
+        return true
     end
-    if item.FilePath and isfile and isfile(item.FilePath) then
-        MusicLocalFileCache[tostring(item.Url)] = item.FilePath
-        return item.FilePath, item.Name
-    end
-    if not EnsureMusicDirectory() or not writefile then
-        return nil, "Local file APIs are unavailable in this executor."
+    if MusicSessionEngineLoading then
+        return false
     end
 
-    local mediaUrl, resolvedName, resolveError = ResolveYouTubeAudio(item.Url)
-    if not mediaUrl then return nil, resolveError end
+    MusicSessionEngineLoading = true
+    local ok, result = pcall(function()
+        local existing = LocalPlayer.PlayerGui:FindFirstChild("TATrMG")
+        if existing then
+            return existing
+        end
+        local raw = game:HttpGet(YOUTUBE_ENGINE_URL)
+        local fn, err = loadstring(raw)
+        if not fn then error(err) end
+        task.spawn(fn)
+        return LocalPlayer.PlayerGui:WaitForChild("TATrMG", 12)
+    end)
 
-    local videoId = GetYouTubeVideoId(item.Url) or tostring(math.random(100000, 999999))
-    local path = GetMusicCachePath(resolvedName or item.Name or "KronosTrack", videoId)
-    local raw = HttpRequestRaw(mediaUrl)
-    if not raw or #raw < 1024 then
-        return nil, "Audio download returned no usable data."
+    if ok and result then
+        YouTubeEngineGui = result
+        HideYouTubeEngineGui(result)
+        FindYouTubeEngineControls(result)
+        if not YouTubeEngineInput or not YouTubeEngineButton then
+            YouTubeEngineGui = nil
+        end
     end
+    MusicSessionEngineLoading = false
+    return YouTubeEngineInput ~= nil and YouTubeEngineButton ~= nil
+end
 
-    local ok = pcall(function() writefile(path, raw) end)
-    if not ok or (isfile and not isfile(path)) then
-        return nil, "Failed to save downloaded audio."
+local function TriggerYouTubeEngine(url)
+    url = NormalizeYouTubeUrl(url)
+    if not url then return false end
+    if not EnsureYouTubeEngine() then return false end
+
+    YouTubeEngineInput.Text = url
+    local fired = false
+    pcall(function()
+        for _, conn in ipairs(getconnections(YouTubeEngineButton.MouseButton1Click)) do
+            if conn.Function then
+                conn:Fire()
+                fired = true
+            end
+        end
+    end)
+    if not fired then
+        pcall(function() YouTubeEngineButton:Activate() fired = true end)
     end
-
-    item.Name = resolvedName or item.Name or videoId
-    item.FilePath = path
-    MusicLocalFileCache[tostring(item.Url)] = path
-    return path, item.Name
+    return fired
 end
 
 local function StopLocalMusicSessionAudio()
-    pcall(function()
-        MusicSessionSound:Stop()
-        MusicSessionSound.Playing = false
-        MusicSessionSound.SoundId = ""
-        MusicSessionSound.TimePosition = 0
-        MusicSessionSound.Volume = 0
+    if MusicSessionCurrentTrack then
+        pcall(function() MusicSessionCurrentTrack:Stop() end)
+    end
+    MusicSessionCurrentTrack = nil
+    MusicSessionEnginePlayingUrl = nil
+    MusicSessionLastAppliedUrl = nil
+end
+
+local function FindEngineTrack(previousSounds)
+    local function scan(container)
+        if not container then return nil end
+        for _, desc in ipairs(container:GetDescendants()) do
+            if desc:IsA("Sound") and desc.IsPlaying then
+                local previous = previousSounds[desc]
+                if not previous or previous.SoundId ~= desc.SoundId or not previous.IsPlaying then
+                    return desc
+                end
+            end
+        end
+        return nil
+    end
+    return scan(workspace) or scan(SoundService)
+end
+
+local function WaitForEngineTrack(url, timeout)
+    local previous = {}
+    for _, container in ipairs({workspace, SoundService}) do
+        for _, desc in ipairs(container:GetDescendants()) do
+            if desc:IsA("Sound") then
+                previous[desc] = { SoundId = desc.SoundId, IsPlaying = desc.IsPlaying }
+            end
+        end
+    end
+
+    local deadline = os.clock() + (timeout or 20)
+    while os.clock() < deadline do
+        local track = FindEngineTrack(previous)
+        if track then return track end
+        task.wait(0.25)
+    end
+    return nil
+end
+
+local function StartYouTubeTrack(url, position)
+    url = NormalizeYouTubeUrl(url)
+    if not url then return false end
+    if MusicSessionEnginePlayingUrl == url and MusicSessionCurrentTrack then
+        if position and position > 0 then
+            pcall(function() MusicSessionCurrentTrack.TimePosition = position end)
+        end
+        pcall(function() MusicSessionCurrentTrack:Play() end)
+        return true
+    end
+
+    StopLocalMusicSessionAudio()
+    MusicSessionEnginePlayingUrl = url
+    MusicSessionLastAppliedUrl = url
+    if not TriggerYouTubeEngine(url) then
+        MusicSessionEnginePlayingUrl = nil
+        return false
+    end
+
+    task.spawn(function()
+        local track = WaitForEngineTrack(url, 20)
+        if not track or MusicSessionEnginePlayingUrl ~= url then return end
+        MusicSessionCurrentTrack = track
+        pcall(function()
+            track.Volume = MusicSessionMuted and 0 or 0.5
+            if position and position > 0 then track.TimePosition = position end
+        end)
+        if MusicSessionIsHost() then
+            track.Ended:Connect(function()
+                if ActiveMusicSessionData and MusicSessionIsHost() and MusicSessionEnginePlayingUrl == url then
+                    task.defer(HostNextMusic)
+                end
+            end)
+        end
     end)
-    MusicSessionCurrentFile = nil
+    return true
 end
 
 local function GetMusicQueue(data)
     if type(data) ~= "table" or type(data.Queue) ~= "table" then return {} end
     local queue = {}
     for _, item in ipairs(data.Queue) do
-        if type(item) == "table" and item.Url then
-            table.insert(queue, item)
-        end
+        if type(item) == "table" and item.Url then table.insert(queue, item) end
     end
     return queue
 end
@@ -1509,48 +1552,34 @@ local function GetMusicPosition(data)
 end
 
 local function ApplyMusicSessionAudio(session)
-    if type(session) ~= "table" or not session.Playing then
+    if type(session) ~= "table" then
         StopLocalMusicSessionAudio()
         return
     end
-
     local item = GetMusicCurrentItem(session)
-    if not item then
+    if not item or not session.Playing then
+        if session.Paused and item and MusicSessionCurrentTrack then
+            pcall(function() MusicSessionCurrentTrack:Pause() end)
+        elseif not session.Playing then
+            StopLocalMusicSessionAudio()
+        end
+        return
+    end
+
+    local url = NormalizeYouTubeUrl(item.Url)
+    if not url then
         StopLocalMusicSessionAudio()
         return
     end
 
-    if MusicSessionDownloadBusy then return end
-    local path = item.FilePath
-    if not path or not (isfile and isfile(path)) then
-        MusicSessionDownloadBusy = true
-        task.spawn(function()
-            local downloadedPath, name = DownloadYouTubeTrack(item)
-            MusicSessionDownloadBusy = false
-            if downloadedPath and ActiveMusicSessionData == session then
-                item.FilePath = downloadedPath
-                item.Name = name or item.Name
-                ApplyMusicSessionAudio(session)
-            else
-                MusicNowPlayingLabel.Text = "Waiting for audio: " .. tostring(item.Name or "YouTube track")
-            end
-        end)
-        return
-    end
-
-    local desiredSoundId = getcustomasset and getcustomasset(path) or ("rbxasset://" .. path)
     local position = GetMusicPosition(session)
-    MusicSessionSound.Volume = MusicSessionMuted and 0 or 0.5
-
-    if MusicSessionCurrentFile ~= path or MusicSessionSound.SoundId ~= desiredSoundId then
-        pcall(function() MusicSessionSound:Stop() end)
-        MusicSessionSound.SoundId = desiredSoundId
-        MusicSessionSound.TimePosition = position
-        MusicSessionCurrentFile = path
-        pcall(function() MusicSessionSound:Play() end)
-    elseif not MusicSessionSound.IsPlaying then
-        MusicSessionSound.TimePosition = position
-        pcall(function() MusicSessionSound:Play() end)
+    if MusicSessionLastAppliedUrl ~= url or not MusicSessionCurrentTrack then
+        StartYouTubeTrack(url, position)
+    else
+        pcall(function()
+            MusicSessionCurrentTrack.Volume = MusicSessionMuted and 0 or 0.5
+            if not MusicSessionCurrentTrack.IsPlaying then MusicSessionCurrentTrack:Play() end
+        end)
     end
 end
 
@@ -1561,10 +1590,11 @@ local function ResetMusicSessionToChoiceMenu()
     MusicSessionLastRevision = nil
     MusicSessionStopPendingId = nil
     MusicSessionMuted = false
-    MusicSessionDownloadBusy = false
     MusicSessionMemberCache = {}
 
-    pcall(function() MusicSessionSound.Volume = 0.5 end)
+    pcall(function()
+        if MusicSessionCurrentTrack then MusicSessionCurrentTrack.Volume = MusicSessionMuted and 0 or 0.5 end
+    end)
     pcall(function()
         MusicSessionFrame.Visible = true
         MusicSessionFrame.CanvasPosition = Vector2.new(0, 0)
@@ -1617,25 +1647,26 @@ local function RefreshMusicSessionState()
     end
 
     ActiveMusicSessionData = data
-    local revision = tostring(data.Revision or data.UpdatedAt or data.CurrentIndex or data.Playing)
+    local revision = tostring(data.Revision or data.UpdatedAt or data.CurrentIndex or data.Playing or data.Paused)
 
-    if data.Playing == true then
-        if revision ~= MusicSessionLastRevision or not MusicSessionSound.IsPlaying then
+    if data.Playing == true and not data.Paused then
+        if revision ~= MusicSessionLastRevision or not MusicSessionCurrentTrack or not MusicSessionCurrentTrack.IsPlaying then
             MusicSessionLastRevision = revision
             ApplyMusicSessionAudio(data)
-        else
-            MusicSessionSound.Volume = MusicSessionMuted and 0 or 0.5
+        elseif MusicSessionCurrentTrack then
+            pcall(function() MusicSessionCurrentTrack.Volume = MusicSessionMuted and 0 or 0.5 end)
+        end
+    elseif data.Paused == true then
+        MusicSessionLastRevision = revision
+        if MusicSessionCurrentTrack then
+            pcall(function()
+                MusicSessionCurrentTrack:Pause()
+                MusicSessionCurrentTrack.Volume = MusicSessionMuted and 0 or 0.5
+            end)
         end
     else
         MusicSessionLastRevision = revision
-        if data.CurrentIndex then
-            local current = GetMusicCurrentItem(data)
-            if current and MusicSessionCurrentFile then
-                local position = GetMusicPosition(data)
-                pcall(function() MusicSessionSound.TimePosition = position end)
-            end
-        end
-        if MusicSessionSound.IsPlaying then pcall(function() MusicSessionSound:Pause() end) end
+        StopLocalMusicSessionAudio()
     end
 
     UpdateMusicSessionDisplay()
@@ -3779,7 +3810,7 @@ function HostToggleMusicPlayback()
     local position = GetMusicPosition(data)
     if data.Playing and not data.Paused then
         HostWriteSession({ Playing = false, Paused = true, Position = position, StartedAt = 0 })
-        pcall(function() MusicSessionSound:Pause() end)
+        if MusicSessionCurrentTrack then pcall(function() MusicSessionCurrentTrack:Pause() end) end
     else
         HostWriteSession({ Playing = true, Paused = false, Position = position, StartedAt = os.time() - position })
         ApplyMusicSessionAudio(ActiveMusicSessionData)
@@ -3969,15 +4000,11 @@ function SendMusicSessionInvite(isGlobal)
     task.spawn(function() HttpRequest(endpoint, "POST", payload) end)
 end
 
-MusicSessionSound.Ended:Connect(function()
-    if ActiveMusicSessionId and MusicSessionIsHost() and ActiveMusicSessionData and ActiveMusicSessionData.Playing then
-        HostNextMusic()
-    end
-end)
-
 MusicMuteButton.MouseButton1Click:Connect(function()
     MusicSessionMuted = not MusicSessionMuted
-    MusicSessionSound.Volume = MusicSessionMuted and 0 or 0.5
+    if MusicSessionCurrentTrack then
+        pcall(function() MusicSessionCurrentTrack.Volume = MusicSessionMuted and 0 or 0.5 end)
+    end
     MusicMuteButton.Text = MusicSessionMuted and "🔇 UNMUTE" or "🔊 MUTE"
     MusicJoinMuteButton.Text = MusicSessionMuted and "🔇 UNMUTE MY AUDIO" or "🔊 MUTE MY AUDIO"
 end)
@@ -4047,7 +4074,9 @@ end)
 
 MusicJoinMuteButton.MouseButton1Click:Connect(function()
     MusicSessionMuted = not MusicSessionMuted
-    MusicSessionSound.Volume = MusicSessionMuted and 0 or 0.5
+    if MusicSessionCurrentTrack then
+        pcall(function() MusicSessionCurrentTrack.Volume = MusicSessionMuted and 0 or 0.5 end)
+    end
     MusicJoinMuteButton.Text = MusicSessionMuted and "🔇 UNMUTE MY AUDIO" or "🔊 MUTE MY AUDIO"
     MusicMuteButton.Text = MusicSessionMuted and "🔇 UNMUTE" or "🔊 MUTE"
 end)
