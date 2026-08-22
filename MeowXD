@@ -206,11 +206,66 @@ local HeaderTitle = label(
 )
 HeaderTitle.Font = Enum.Font.GothamBold
 
+--// Main window dragging
+local MainDragging = false
+local MainDragStart
+local MainStartPosition
+
+local function BeginMainDrag(input)
+    MainDragging = true
+    MainDragStart = input.Position
+    MainStartPosition = Main.Position
+
+    input.Changed:Connect(function()
+        if input.UserInputState == Enum.UserInputState.End then
+            MainDragging = false
+        end
+    end)
+end
+
+Header.InputBegan:Connect(function(input)
+    if input.UserInputType == Enum.UserInputType.MouseButton1
+        or input.UserInputType == Enum.UserInputType.Touch then
+        BeginMainDrag(input)
+    end
+end)
+
+UserInputService.InputChanged:Connect(function(input)
+    if not MainDragging then return end
+
+    if input.UserInputType == Enum.UserInputType.MouseMovement
+        or input.UserInputType == Enum.UserInputType.Touch then
+
+        local delta = input.Position - MainDragStart
+
+        Main.Position = UDim2.new(
+            MainStartPosition.X.Scale,
+            MainStartPosition.X.Offset + delta.X,
+            MainStartPosition.Y.Scale,
+            MainStartPosition.Y.Offset + delta.Y
+        )
+    end
+end)
+
+--// Header hide button
+local HideButton = button(
+    Header,
+    "×",
+    UDim2.fromOffset(25, 25),
+    UDim2.new(1, -31, 0, 5)
+)
+HideButton.TextSize = 18
+HideButton.BackgroundColor3 = Color3.fromRGB(110, 20, 25)
+HideButton.MouseButton1Click:Connect(function()
+    Main.Visible = false
+end)
+
 --// Tabs
 local Tabs = {
-    {"GLOBAL", 78},
-    {"SERVER", 78},
-    {"ABOUT", 70},
+    {"GLOBAL", 70},
+    {"SERVER", 70},
+    {"PROFILE", 70},
+    {"ABOUT", 65},
     {"STICKERS", 78},
 }
 
@@ -264,6 +319,55 @@ AboutPanel.ScrollBarThickness = 3
 AboutPanel.Visible = false
 AboutPanel.Parent = Content
 corner(AboutPanel, 9)
+
+
+local ProfilePanel = Instance.new("Frame")
+ProfilePanel.Name = "ProfilePanel"
+ProfilePanel.Size = UDim2.fromScale(1, 1)
+ProfilePanel.BackgroundColor3 = Color3.fromRGB(15, 15, 25)
+ProfilePanel.BackgroundTransparency = 0.25
+ProfilePanel.BorderSizePixel = 0
+ProfilePanel.Visible = false
+ProfilePanel.Parent = Content
+corner(ProfilePanel, 9)
+stroke(ProfilePanel, 1.2, Color3.fromRGB(255, 0, 0), 0.35)
+
+local ProfileTitle = label(
+    ProfilePanel,
+    "PROFILE",
+    UDim2.new(1, -24, 0, 30),
+    UDim2.fromOffset(12, 10),
+    16,
+    Color3.fromRGB(255, 255, 255)
+)
+ProfileTitle.Font = Enum.Font.GothamBold
+
+local ProfileName = label(
+    ProfilePanel,
+    "Display Name: " .. LocalPlayer.DisplayName,
+    UDim2.new(1, -24, 0, 24),
+    UDim2.fromOffset(12, 50),
+    12,
+    Color3.fromRGB(235, 235, 240)
+)
+
+local ProfileUser = label(
+    ProfilePanel,
+    "Username: @" .. LocalPlayer.Name,
+    UDim2.new(1, -24, 0, 24),
+    UDim2.fromOffset(12, 76),
+    11,
+    Color3.fromRGB(165, 165, 180)
+)
+
+local ProfileStatus = label(
+    ProfilePanel,
+    "Status: Kronos Chat V1 simulation",
+    UDim2.new(1, -24, 0, 24),
+    UDim2.fromOffset(12, 105),
+    11,
+    Color3.fromRGB(0, 255, 150)
+)
 
 local AboutText = label(
     AboutPanel,
@@ -478,6 +582,8 @@ local function RefreshMessages()
         AddMessage({name = LocalPlayer.DisplayName, tag = "USER", text = "Only server-style demo messages appear here.", mine = true})
     elseif ActiveTab == "STICKERS" then
         AddMessage({name = "Kronos", tag = "STICKER", text = "Open the sticker picker below the input bar.", mine = false})
+    elseif ActiveTab == "PROFILE" then
+        -- Profile is represented by ProfilePanel.
     end
 end
 
@@ -547,6 +653,7 @@ end)
 local function SetTab(tabName)
     ActiveTab = tabName
 
+    InputBar.Visible = (tabName == "GLOBAL" or tabName == "SERVER" or tabName == "STICKERS")
     for name, b in pairs(TabButtons) do
         b.BackgroundColor3 =
             name == tabName
@@ -556,6 +663,7 @@ local function SetTab(tabName)
 
     MessageScroll.Visible = tabName ~= "ABOUT"
     AboutPanel.Visible = tabName == "ABOUT"
+    ProfilePanel.Visible = tabName == "PROFILE"
 
     if tabName == "STICKERS" then
         StickerPanel.Visible = true
@@ -576,9 +684,9 @@ end
 --// FLOATING TOGGLE
 --// ================================================================
 
-local Toggle = button(Gui, "KRONOS", UDim2.fromOffset(110, 38), UDim2.new(0.02, 0, 0.5, 0))
+local Toggle = button(Gui, "乂 K 乂", UDim2.fromOffset(72, 34), UDim2.new(0.02, 0, 0.5, 0))
 Toggle.BackgroundColor3 = Color3.fromRGB(10, 10, 15)
-Toggle.BackgroundTransparency = 0.2
+Toggle.BackgroundTransparency = 0.12
 Toggle.TextSize = 12
 stroke(Toggle, 2.2, Color3.fromRGB(255, 0, 0), 0)
 
